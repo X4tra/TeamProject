@@ -1,3 +1,3 @@
-*Team Project
+# Team Project
 
-#Proszę nie robić burdelu
+**Proszę nie robić burdelu**
