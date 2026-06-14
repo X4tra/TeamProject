@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Speed Limit Control</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;500;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/static/speed-limit-manager.css" />
+</head>
+<body>
+<div class="page">
+
+  <!-- NAV -->
+  <nav>
+    <div class="nav-brand">
+      <div class="nav-dot"></div>
+      SpeedCtrl
+    </div>
+    <div class="nav-status" id="nav-status">SYS — AUTO</div>
+  </nav>
+
+  <!-- MAIN -->
+  <main>
+    <div class="container">
+
+      <div class="section-label">Control panel</div>
+
+      <!-- MODE CARD -->
+      <div class="card">
+        <div class="mode-row">
+          <div class="mode-info">
+            <div class="mode-title">Control mode</div>
+            <div class="mode-desc" id="mode-desc">System managing limit automatically</div>
+          </div>
+          <div class="toggle-wrap">
+            <span class="toggle-label-text auto" id="toggle-label">AUTO</span>
+            <button class="toggle" id="toggle" role="switch" aria-checked="false" aria-label="Toggle manual mode">
+              <div class="knob"></div>
+            </button>
+          </div>
+        </div>
+
+        <div class="manual-section" id="manual-section">
+          <div class="divider"></div>
+          <div class="input-row">
+            <span class="input-lbl">Set limit</span>
+            <input class="speed-input" type="number" id="speed-input" min="5" max="200" step="5" value="50" aria-label="Speed limit value" />
+            <span class="unit">km/h</span>
+            <button class="apply-btn" id="apply-btn" onclick="applyLimit()">Apply</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- DISPLAY CARD -->
+      <div class="section-label" style="margin-top:1.5rem;">Active limit</div>
+      <div class="display-card">
+        <div class="sign-wrap">
+          <div class="sign" id="sign">
+            <span class="sign-lbl">speed</span>
+            <span class="sign-lbl">limit</span>
+            <span class="sign-num" id="sign-num">50</span>
+          </div>
+        </div>
+        <div class="info">
+          <div class="big-num" id="big-num">50</div>
+          <div class="big-unit">km / h</div>
+          <div class="badge auto" id="badge">
+            <div class="badge-dot"></div>
+            <span id="badge-text">Automatic mode</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- FOOTER -->
+  <footer>
+    <div class="footer-text">Speed limit manager v1.0</div>
+    <div class="footer-limits">
+      <div class="limit-pill">Min <span>5</span></div>
+      <div class="limit-pill">Max <span>200</span></div>
+    </div>
+  </footer>
+
+</div>
+
+<script>
+  const toggle = document.getElementById('toggle');
+  const toggleLabel = document.getElementById('toggle-label');
+  const modeDesc = document.getElementById('mode-desc');
+  const manualSection = document.getElementById('manual-section');
+  const speedInput = document.getElementById('speed-input');
+  const signNum = document.getElementById('sign-num');
+  const bigNum = document.getElementById('big-num');
+  const badge = document.getElementById('badge');
+  const badgeText = document.getElementById('badge-text');
+  const sign = document.getElementById('sign');
+  const navStatus = document.getElementById('nav-status');
+
+  const AUTO_LIMIT = 50;
+  let isManual = false;
+  let activeLimit = AUTO_LIMIT;
+
+  // Initialize from API
+  async function init() {
+    try {
+      const response = await fetch('/api/status');
+      const data = await response.json();
+      isManual = data.is_manual;
+      activeLimit = data.active_limit;
+      
+      // Update UI to match backend state
+      updateUIState();
+      updateDisplay();
+    } catch (error) {
+      console.error('Failed to fetch initial status:', error);
+    }
+  }
+
+  function updateUIState() {
+    toggle.setAttribute('aria-checked', isManual);
+    toggle.classList.toggle('manual', isManual);
+    document.body.classList.toggle('manual-active', isManual);
+
+    if (isManual) {
+      toggleLabel.textContent = 'MANUAL';
+      toggleLabel.className = 'toggle-label-text manual';
+      modeDesc.textContent = 'You are controlling the speed limit';
+      manualSection.classList.add('visible');
+      navStatus.textContent = 'SYS — MANUAL';
+    } else {
+      toggleLabel.textContent = 'AUTO';
+      toggleLabel.className = 'toggle-label-text auto';
+      modeDesc.textContent = 'System managing limit automatically';
+      manualSection.classList.remove('visible');
+      navStatus.textContent = 'SYS — AUTO';
+    }
+  }
+
+  toggle.addEventListener('click', async () => {
+    const newManual = !isManual;
+    
+    try {
+      const response = await fetch('/api/mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_manual: newManual })
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        isManual = data.is_manual;
+        activeLimit = data.active_limit;
+        updateUIState();
+        updateDisplay();
+      }
+    } catch (error) {
+      console.error('Failed to update mode:', error);
+    }
+  });
+
+  async function applyLimit() {
+    const val = parseInt(speedInput.value, 10);
+    if (isNaN(val) || val < 5 || val > 200) {
+      speedInput.style.borderColor = '#c0392b';
+      setTimeout(() => speedInput.style.borderColor = '', 800);
+      return;
+    }
+
+    try {
+      const response = await fetch('/api/limit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ limit: val })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        activeLimit = data.active_limit;
+        updateDisplay();
+
+        const btn = document.getElementById('apply-btn');
+        btn.textContent = 'Applied ✓';
+        setTimeout(() => btn.textContent = 'Apply', 1400);
+      } else {
+        const errorData = await response.json();
+        alert(errorData.detail || 'Failed to apply limit');
+      }
+    } catch (error) {
+      console.error('Failed to apply limit:', error);
+    }
+  }
+
+  speedInput.addEventListener('keydown', e => { if (e.key === 'Enter') applyLimit(); });
+
+  const displayCard = document.querySelector('.display-card');
+  let lastLimit = -1;
+
+  function updateDisplay() {
+    signNum.textContent = activeLimit;
+    bigNum.textContent = activeLimit;
+
+    // Trigger ripple animation if the limit changed
+    if (activeLimit !== lastLimit) {
+      displayCard.classList.remove('ripple');
+      void displayCard.offsetWidth; // trigger reflow
+      displayCard.classList.add('ripple');
+      lastLimit = activeLimit;
+    }
+
+    if (isManual) {
+      badge.className = 'badge manual';
+      badgeText.textContent = 'Manual mode';
+      sign.classList.add('manual-mode');
+    } else {
+      badge.className = 'badge auto';
+      badgeText.textContent = 'Automatic mode';
+      sign.classList.remove('manual-mode');
+    }
+  }
+
+  // Run init on load
+  init();
+
+  // Optional: Poll for updates every 2 seconds to stay in sync with Raspberry Pi
+  setInterval(init, 2000);
+</script>
+</body>
+</html>
