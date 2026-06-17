@@ -1,16 +1,16 @@
 version: '3.8'
 
 services:
-    # dashboard:
-    #     build: ./dashboard
-    #     networks:
-    #         - TPnet
-    #     restart: unless-stopped
-    api:
-        build: ./backend
+    dashboard:
+        build: ./dashboard
         networks:
             - TPnet
         restart: unless-stopped
+    # api:
+    #     build: ./backend
+    #     networks:
+    #         - TPnet
+    #     restart: unless-stopped
     # counter:
     #     build: ./counter
     #     networks:
