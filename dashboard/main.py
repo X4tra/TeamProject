@@ -90,6 +90,10 @@ async def update_mode(data: ModeUpdate):
         state["active_limit"] = calculate_limit_from_traffic(state["traffic_density"])
     return state
 
+@app.get("/api/test")
+async def get_test():
+    return {"message": "Test endpoint is working!"}
+
 @app.post("/api/limit")
 async def update_limit(data: LimitUpdate):
     if data.limit < 5 or data.limit > 200:
