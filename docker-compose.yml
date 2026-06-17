@@ -7,6 +7,12 @@ services:
         networks:
             - TPnet
         restart: unless-stopped
+        healthcheck:
+            test: [ "CMD", "curl", "-f", "http://localhost:8000/" ]
+            interval: 3s
+            timeout: 3s
+            retries: 5
+            start_period: 2s
     # api:
     #     build: ./backend
     #     networks:
@@ -23,6 +29,9 @@ services:
         networks:
             - TPnet
         restart: unless-stopped
+        depends_on:
+            dashboard:
+                condition: service_healthy
 
 networks:
     TPnet:
