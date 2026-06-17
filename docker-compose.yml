@@ -6,16 +6,16 @@ services:
     #     networks:
     #         - TPnet
     #     restart: unless-stopped
-    # api:
-    #     build: ./backend
-    #     networks:
-    #         - TPnet
-    #     restart: unless-stopped
-    counter:
-        build: ./counter
+    api:
+        build: ./backend
         networks:
             - TPnet
         restart: unless-stopped
+    # counter:
+    #     build: ./counter
+    #     networks:
+    #         - TPnet
+    #     restart: unless-stopped
     test:
         build: ./test
         networks:
