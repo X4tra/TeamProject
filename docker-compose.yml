@@ -3,6 +3,7 @@ version: '3.8'
 services:
     dashboard:
         build: ./dashboard
+        container_name: dashboard
         networks:
             - TPnet
         restart: unless-stopped
@@ -18,6 +19,7 @@ services:
     #     restart: unless-stopped
     test:
         build: ./test
+        container_name: test
         networks:
             - TPnet
         restart: unless-stopped
