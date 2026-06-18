@@ -4,6 +4,8 @@ services:
     dashboard:
         build: ./dashboard
         container_name: dashboard
+        ports:
+            - "8000:8000"
         networks:
             - TPnet
         restart: unless-stopped
