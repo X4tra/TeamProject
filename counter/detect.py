@@ -10,12 +10,12 @@ Install deps on Pi:
 
 Usage examples
 --------------
-  python3 detect.py                                   # Pi camera (default)
-  python3 detect.py --source 0                        # USB / CSI cam via OpenCV
-  python3 detect.py --source finalvehicle.mp4         # prerecorded video
-  python3 detect.py --no-flip                         # disable horizontal flip
-  python3 detect.py --model yolov8n_ncnn_model        # NCNN model folder
-  python3 detect.py --frame-skip 3 --conf 0.35        # tuning options
+  python3 detect.py                                        # Pi camera, fullscreen
+  python3 detect.py --source 0                            # USB/CSI cam via OpenCV
+  python3 detect.py --source finalvehicle.mp4             # prerecorded video
+  python3 detect.py --no-fullscreen                       # windowed mode
+  python3 detect.py --no-flip                             # disable horizontal flip
+  python3 detect.py --frame-skip 3 --conf 0.35           # tuning options
 """
 
 import argparse
@@ -26,107 +26,80 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-import utils  # zone-counting, motion detection, drawing, CSV logging
+import utils
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VEHICLE_CLASS_IDS       = {2, 3, 5, 7}   # car, motorcycle, bus, truck
-DISPLAY_W, DISPLAY_H   = 960, 720
-YOLO_IMGSZ             = 320
-MOTION_SPEEDUP_FACTOR  = 2
+VEHICLE_CLASS_IDS      = {2, 3, 5, 7}
+DISPLAY_W, DISPLAY_H  = 960, 720
+YOLO_IMGSZ            = 320
+MOTION_SPEEDUP_FACTOR = 2
+WINDOW_NAME           = "Vehicle Detector"
 
 
 # ---------------------------------------------------------------------------
 # .param parser — auto-detects input / output blob names
 # ---------------------------------------------------------------------------
 
-def _parse_ncnn_layer_names(param_path: str) -> tuple[str, str]:
-    """
-    Read a .param file and return (input_blob_name, output_blob_name).
-
-    NCNN .param line format:
-        LayerType  LayerName  num_inputs  num_outputs  [blobs...]  [key=val...]
-
-    The Input layer's output blob  = the network's input name.
-    The last layer's output blob   = the network's output name.
-    """
-    input_name  = "in0"    # safe fallback
-    output_name = "out0"   # safe fallback
-
+def _parse_ncnn_layer_names(param_path):
+    input_name  = "in0"
+    output_name = "out0"
     try:
         with open(param_path, "r") as f:
             lines = f.readlines()
-
-        for line in lines[2:]:          # skip magic + count lines
+        for line in lines[2:]:
             parts = line.strip().split()
             if len(parts) < 5:
                 continue
-
             layer_type = parts[0]
             try:
                 num_in  = int(parts[2])
                 num_out = int(parts[3])
             except ValueError:
                 continue
-
-            # Collect blob tokens (stop at first key=value param)
             blobs = []
             for tok in parts[4:]:
                 if "=" in tok:
                     break
                 blobs.append(tok)
-
             in_blobs  = blobs[:num_in]
             out_blobs = blobs[num_in: num_in + num_out]
-
             if layer_type == "Input" and out_blobs:
                 input_name = out_blobs[0]
-
             if out_blobs:
-                output_name = out_blobs[0]   # keep updating → ends on last layer
-
+                output_name = out_blobs[0]
     except Exception as e:
-        print(f"[Warning] Could not parse {param_path}: {e}  — using defaults")
-
+        print(f"[Warning] Could not parse {param_path}: {e} — using defaults")
     return input_name, output_name
 
 
 # ---------------------------------------------------------------------------
-# Model loading  (pure NCNN — no ultralytics, no torch)
+# Model loading
 # ---------------------------------------------------------------------------
 
-def load_yolo(model_path: str):
-    """Load a YOLOv8 NCNN model folder directly."""
+def load_yolo(model_path):
     try:
         import ncnn
     except ImportError:
-        sys.exit(
-            "ERROR: 'ncnn' package not found.\n"
-            "Install it with:  pip3 install ncnn --break-system-packages"
-        )
+        sys.exit("ERROR: ncnn not found.\nInstall: pip3 install ncnn --break-system-packages")
 
     param = str(Path(model_path) / "model.ncnn.param")
     bins  = str(Path(model_path) / "model.ncnn.bin")
 
     if not Path(param).exists():
-        sys.exit(
-            f"ERROR: Cannot find {param}\n"
-            f"Make sure '{model_path}' contains model.ncnn.param and model.ncnn.bin"
-        )
+        sys.exit(f"ERROR: Cannot find {param}")
 
-    # Auto-detect layer names from the .param file
     input_name, output_name = _parse_ncnn_layer_names(param)
-    print(f"[Model] NCNN layer names — input: '{input_name}'  output: '{output_name}'")
+    print(f"[Model] Layer names — input: '{input_name}'  output: '{output_name}'")
 
     net = ncnn.Net()
-    net.opt.use_vulkan_compute = False   # Pi has no Vulkan GPU
-    net.opt.num_threads        = 4       # use all 4 Pi cores
+    net.opt.use_vulkan_compute = False
+    net.opt.num_threads        = 4
     net.load_param(param)
     net.load_model(bins)
     print(f"[Model] Loaded: {model_path}")
 
-    # Return as dict — ncnn.Net doesn't support custom attributes
     return {"net": net, "input": input_name, "output": output_name}
 
 
@@ -134,36 +107,21 @@ def load_yolo(model_path: str):
 # Inference
 # ---------------------------------------------------------------------------
 
-def detect_yolo(model, image: np.ndarray, conf: float) -> list[dict]:
-    """
-    Run YOLOv8 NCNN inference on a single BGR frame.
-
-    Returns a list of dicts:
-        { 'box': [x1, y1, x2, y2], 'class_id': int, 'score': float }
-    Only VEHICLE_CLASS_IDS are returned.
-    """
+def detect_yolo(model, image, conf):
     import ncnn
 
-    # Unpack model dict — ncnn.Net doesn't support custom attributes
     ncnn_net    = model["net"]
     input_name  = model["input"]
     output_name = model["output"]
 
     h, w = image.shape[:2]
 
-    # Pre-process: resize + normalise to [0, 1]
     mat_in = ncnn.Mat.from_pixels_resize(
-        image,
-        ncnn.Mat.PixelType.PIXEL_BGR,
-        w, h,
-        YOLO_IMGSZ, YOLO_IMGSZ,
+        image, ncnn.Mat.PixelType.PIXEL_BGR,
+        w, h, YOLO_IMGSZ, YOLO_IMGSZ,
     )
-    mat_in.substract_mean_normalize(
-        [0, 0, 0],
-        [1 / 255.0, 1 / 255.0, 1 / 255.0],
-    )
+    mat_in.substract_mean_normalize([0, 0, 0], [1/255.0, 1/255.0, 1/255.0])
 
-    # Inference
     ex = ncnn_net.create_extractor()
     ex.input(input_name, mat_in)
     ret, mat_out = ex.extract(output_name)
@@ -171,13 +129,9 @@ def detect_yolo(model, image: np.ndarray, conf: float) -> list[dict]:
     if ret != 0 or mat_out is None:
         return []
 
-    # YOLOv8 NCNN output: (84, 2100) for imgsz=320
-    #   84   = 4 box coords (cx, cy, w, h in YOLO_IMGSZ space) + 80 class scores
-    #   2100 = 10×10 + 20×20 + 40×40 anchor grid
-    out = np.array(mat_out).T          # → (2100, 84)
-
-    boxes_xywh       = out[:, :4]      # cx, cy, w, h
-    class_scores_all = out[:, 4:]      # (2100, 80)
+    out = np.array(mat_out).T          # (2100, 84)
+    boxes_xywh       = out[:, :4]
+    class_scores_all = out[:, 4:]
 
     class_ids    = np.argmax(class_scores_all, axis=1)
     class_scores = class_scores_all[np.arange(len(out)), class_ids]
@@ -191,16 +145,13 @@ def detect_yolo(model, image: np.ndarray, conf: float) -> list[dict]:
         cls_id = int(class_ids[i])
         if cls_id not in VEHICLE_CLASS_IDS:
             continue
-
         cx, cy, bw, bh = boxes_xywh[i]
         x1 = max(0, int((cx - bw / 2) * scale_x))
         y1 = max(0, int((cy - bh / 2) * scale_y))
         x2 = min(w,  int((cx + bw / 2) * scale_x))
         y2 = min(h,  int((cy + bh / 2) * scale_y))
-
         if x2 <= x1 or y2 <= y1:
             continue
-
         boxes_list.append([x1, y1, x2, y2])
         cls_list.append(cls_id)
         score_list.append(float(class_scores[i]))
@@ -208,8 +159,7 @@ def detect_yolo(model, image: np.ndarray, conf: float) -> list[dict]:
     if not boxes_list:
         return []
 
-    # Non-maximum suppression
-    nms_boxes = [[x1, y1, x2 - x1, y2 - y1] for x1, y1, x2, y2 in boxes_list]
+    nms_boxes = [[x1, y1, x2-x1, y2-y1] for x1, y1, x2, y2 in boxes_list]
     indices   = cv2.dnn.NMSBoxes(nms_boxes, score_list, conf, 0.45)
 
     if len(indices) == 0:
@@ -225,15 +175,11 @@ def detect_yolo(model, image: np.ndarray, conf: float) -> list[dict]:
 # Camera helpers
 # ---------------------------------------------------------------------------
 
-def open_picamera(width: int, height: int):
+def open_picamera(width, height):
     try:
         from picamera2 import Picamera2
     except ImportError:
-        sys.exit(
-            "ERROR: picamera2 not found.\n"
-            "Install:  sudo apt install python3-picamera2\n"
-            "Or use --source 0 to use the camera via OpenCV instead."
-        )
+        sys.exit("ERROR: picamera2 not found.\nInstall: sudo apt install python3-picamera2")
     picam  = Picamera2()
     config = picam.create_video_configuration(
         main={"size": (width, height), "format": "BGR888"}
@@ -245,7 +191,7 @@ def open_picamera(width: int, height: int):
     return picam
 
 
-def read_picamera_frame(picam) -> tuple[bool, np.ndarray]:
+def read_picamera_frame(picam):
     return True, picam.capture_array()
 
 
@@ -270,28 +216,41 @@ def run(args):
 
     model = load_yolo(args.model)
 
-    base_skip   = args.frame_skip
-    fps         = 0.0
-    fps_counter = 0
-    fps_timer   = time.time()
-    FPS_WINDOW  = 10
+    # Set up window — fullscreen by default for small attached screen
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+    if args.fullscreen:
+        cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
+    base_skip       = args.frame_skip
+    fps             = 0.0
+    fps_counter     = 0
+    fps_timer       = time.time()
+    FPS_WINDOW      = 10
     raw_frame_count = 0
     last_annotated  = None
+    read_failures   = 0
+    MAX_FAILURES    = 10   # retries before giving up
 
     print("[Detector] Starting.  Press ESC to quit.")
     print(f"[CSV] Logging to: {utils.CSV_PATH.resolve()}")
 
     while True:
+        # --- Read frame (with retry on failure) ---
         if use_picamera:
             success, image = read_picamera_frame(picam)
         else:
             success, image = cap.read()
 
         if not success or image is None:
-            print("[Info] End of stream — exiting.")
-            break
+            read_failures += 1
+            print(f"[Warning] Frame read failed ({read_failures}/{MAX_FAILURES}), retrying...")
+            time.sleep(0.1)
+            if read_failures >= MAX_FAILURES:
+                print("[Error] Too many failures — exiting.")
+                break
+            continue
 
+        read_failures   = 0   # reset on success
         raw_frame_count += 1
 
         frame_disp = cv2.resize(image, (DISPLAY_W, DISPLAY_H))
@@ -301,9 +260,10 @@ def run(args):
         motion   = utils.detect_motion(frame_disp)
         cur_skip = max(1, base_skip // MOTION_SPEEDUP_FACTOR) if motion else base_skip
 
+        # Show cached frame on skipped frames so display stays smooth
         if raw_frame_count % cur_skip != 0:
             if last_annotated is not None:
-                cv2.imshow("Vehicle Detector", last_annotated)
+                cv2.imshow(WINDOW_NAME, last_annotated)
             if cv2.waitKey(1) == 27:
                 break
             continue
@@ -323,7 +283,7 @@ def run(args):
                     (10, 20), cv2.FONT_HERSHEY_PLAIN, 1.2, (0, 0, 255), 2)
 
         last_annotated = image
-        cv2.imshow("Vehicle Detector", image)
+        cv2.imshow(WINDOW_NAME, image)
         if cv2.waitKey(1) == 27:
             break
 
@@ -343,16 +303,18 @@ def main():
     parser = argparse.ArgumentParser(
         description="Vehicle detector + zone counter (YOLOv8 NCNN, no torch)"
     )
-    parser.add_argument("--model",      default="yolov8n_ncnn_model",
+    parser.add_argument("--model",        default="yolov8n_ncnn_model",
                         help="NCNN model folder. Default: yolov8n_ncnn_model")
-    parser.add_argument("--source",     default="picamera",
-                        help="'picamera', camera index, or video path. Default: picamera")
-    parser.add_argument("--conf",       type=float, default=0.30,
-                        help="Confidence threshold. Default: 0.30")
-    parser.add_argument("--frame-skip", type=int,   default=4,
+    parser.add_argument("--source",       default="picamera",
+                        help="'picamera', camera index (0,1..), or video path.")
+    parser.add_argument("--conf",         type=float, default=0.30,
+                        help="Confidence threshold 0-1. Default: 0.30")
+    parser.add_argument("--frame-skip",   type=int, default=4,
                         help="Inference every N frames. Default: 4")
-    parser.add_argument("--no-flip",    dest="flip", action="store_false", default=True,
+    parser.add_argument("--no-flip",      dest="flip", action="store_false", default=True,
                         help="Disable horizontal flip.")
+    parser.add_argument("--no-fullscreen", dest="fullscreen", action="store_false", default=True,
+                        help="Run in a window instead of fullscreen.")
 
     args = parser.parse_args()
     if args.frame_skip < 1:
