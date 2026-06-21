@@ -208,8 +208,21 @@ def open_picamera(width, height):
 
 
 def read_picamera_frame(picam):
-    return True, picam.capture_array()
+    try:
+        frame = picam.capture_array()
 
+        if frame is None:
+            print("capture_array returned None")
+            return False, None
+
+        print(frame.shape)
+
+        return True, frame
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return False, None
 
 # ---------------------------------------------------------------------------
 # Pygame display helpers
