@@ -1,44 +1,4 @@
 #!/usr/bin/env python3
-"""
-vehicle_counter_pi.py — lightweight vehicle detector + line counter for Raspberry Pi
-=====================================================================================
-
-What this version does
-----------------------
-- Uses Picamera2 by default on Raspberry Pi.
-- Uses pygame for display instead of cv2.imshow().
-- Keeps inference lightweight by defaulting to an exported NCNN model folder.
-- Counts vehicles crossing a vertical line.
-- Logs each counted vehicle to CSV.
-- Has a small built-in tracker so you do not need tracker.py.
-
-Recommended model path
-----------------------
-Export a nano YOLO model to NCNN on your desktop and copy the folder here.
-Examples:
-    yolo26n_ncnn_model/
-    yolo11n_ncnn_model/
-    yolov8n_ncnn_model/
-
-On a desktop with Ultralytics installed:
-    yolo export model=yolo26n.pt format=ncnn imgsz=320
-or:
-    yolo export model=yolo11n.pt format=ncnn imgsz=320
-
-Install on Raspberry Pi
------------------------
-    sudo apt update
-    sudo apt install python3-opencv python3-numpy python3-picamera2 python3-pygame
-    pip3 install ncnn --break-system-packages
-
-Usage
------
-    python3 vehicle_counter_pi.py
-    python3 vehicle_counter_pi.py --source 0
-    python3 vehicle_counter_pi.py --source video.mp4
-    python3 vehicle_counter_pi.py --model yolo11n_ncnn_model
-    python3 vehicle_counter_pi.py --no-fullscreen
-"""
 
 from __future__ import annotations
 
@@ -96,7 +56,7 @@ MOTION_BLUR_K = 21
 MOTION_SPEEDUP_FACTOR = 2
 
 # Model defaults
-DEFAULT_MODEL = "yolo26n_ncnn_model"
+DEFAULT_MODEL = "yolo11n_ncnn_model"
 
 
 # =============================================================================
