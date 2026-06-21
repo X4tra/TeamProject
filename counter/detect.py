@@ -126,17 +126,15 @@ def load_yolo(model_path: str):
     net.load_model(bins)
     print(f"[Model] Loaded: {model_path}")
 
-    # Store names on the net object so detect_yolo can read them
-    net._input_name  = input_name
-    net._output_name = output_name
-    return net
+    # Return as dict — ncnn.Net doesn't support custom attributes
+    return {"net": net, "input": input_name, "output": output_name}
 
 
 # ---------------------------------------------------------------------------
 # Inference
 # ---------------------------------------------------------------------------
 
-def detect_yolo(net, image: np.ndarray, conf: float) -> list[dict]:
+def detect_yolo(model, image: np.ndarray, conf: float) -> list[dict]:
     """
     Run YOLOv8 NCNN inference on a single BGR frame.
 
@@ -145,6 +143,11 @@ def detect_yolo(net, image: np.ndarray, conf: float) -> list[dict]:
     Only VEHICLE_CLASS_IDS are returned.
     """
     import ncnn
+
+    # Unpack model dict — ncnn.Net doesn't support custom attributes
+    ncnn_net    = model["net"]
+    input_name  = model["input"]
+    output_name = model["output"]
 
     h, w = image.shape[:2]
 
@@ -161,9 +164,9 @@ def detect_yolo(net, image: np.ndarray, conf: float) -> list[dict]:
     )
 
     # Inference
-    ex = net.create_extractor()
-    ex.input(net._input_name, mat_in)
-    ret, mat_out = ex.extract(net._output_name)
+    ex = ncnn_net.create_extractor()
+    ex.input(input_name, mat_in)
+    ret, mat_out = ex.extract(output_name)
 
     if ret != 0 or mat_out is None:
         return []
