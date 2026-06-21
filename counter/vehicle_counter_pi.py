@@ -790,7 +790,7 @@ def run(args):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Lightweight vehicle counter for Raspberry Pi")
     parser.add_argument("--model", default=DEFAULT_MODEL,
-                        help="NCNN folder or .pt file. Default: yolo26n_ncnn_model")
+                        help="NCNN folder or .pt file. Default: yolo11n_ncnn_model")
     parser.add_argument("--source", default="picamera",
                         help="'picamera', camera index (0,1..), or video path.")
     parser.add_argument("--conf", type=float, default=0.25,
