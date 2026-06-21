@@ -4,34 +4,24 @@ detect.py  —  Vehicle detector + zone counter for Raspberry Pi 4
 
 Detection backend
 -----------------
-Uses YOLOv8n (Ultralytics).  For best Pi 4 performance export the model to
-NCNN once on your desktop:
+Uses YOLOv8n NCNN directly (no ultralytics, no torch required).
+Export the model once on your desktop:
 
     pip install ultralytics
     yolo export model=yolov8n.pt format=ncnn imgsz=320
 
 Then copy the resulting `yolov8n_ncnn_model/` folder next to this script and
 pass --model yolov8n_ncnn_model  (the folder, not a .pt file).
-The NCNN backend avoids PyTorch entirely and runs ~2–3× faster on ARM.
+
+Install deps on Pi (no torch needed):
+    sudo apt install python3-opencv python3-numpy python3-picamera2
+    pip3 install ncnn pillow pyyaml tqdm psutil --break-system-packages
 
 Input sources  (--source)
 --------------------------
-  picamera              Raspberry Pi camera module via Picamera2  ← DEFAULT
+  picamera              Raspberry Pi camera module via Picamera2  <- DEFAULT
   0                     first USB / CSI camera (OpenCV)
   finalvehicle.mp4      prerecorded file (for offline testing)
-
-Motion-adaptive sampling
--------------------------
-utils.detect_motion() runs on every raw frame (it is cheap — just a blurred
-frame-diff).  When motion is detected the effective frame-skip is halved
-(i.e. inference runs twice as often) so fast-moving vehicles are not missed.
-The normal frame-skip is restored once the scene is still again.
-
-CSV logging
------------
-Every time a vehicle crosses the counting line its type, object-id, confidence
-score, date and exact time (HH:MM:SS) are appended to vehicle_log.csv next to
-the script.  Existing rows are never overwritten — the file grows across runs.
 
 Usage examples
 --------------
@@ -68,59 +58,130 @@ YOLO_IMGSZ = 320
 
 # Motion-adaptive sampling:
 #   When motion is detected, frame_skip is divided by this factor (floored).
-#   E.g. base frame-skip=4 → active frame-skip=2 during motion.
-#   A value of 2 means "run inference twice as often when there is motion".
 MOTION_SPEEDUP_FACTOR = 2
 
 
 # ---------------------------------------------------------------------------
-# Model loading
+# Model loading  (pure NCNN — no ultralytics, no torch)
 # ---------------------------------------------------------------------------
 
 def load_yolo(model_path: str):
-    """Load a YOLOv8 model (.pt file or NCNN folder)."""
+    """Load a YOLOv8 NCNN model folder directly."""
     try:
-        from ultralytics import YOLO
+        import ncnn
     except ImportError:
         sys.exit(
-            "ERROR: 'ultralytics' package not found.\n"
-            "Install it with:  pip install ultralytics"
+            "ERROR: 'ncnn' package not found.\n"
+            "Install it with:  pip3 install ncnn --break-system-packages"
         )
 
-    model = YOLO(model_path)
-    print(f"[Model] Loaded: {model_path}")
-    return model
+    net = ncnn.Net()
+    net.opt.use_vulkan_compute = False   # Pi has no Vulkan GPU
+    net.opt.num_threads = 4             # use all 4 Pi cores
+
+    param = str(Path(model_path) / "model.ncnn.param")
+    bins  = str(Path(model_path) / "model.ncnn.bin")
+
+    if not Path(param).exists():
+        sys.exit(f"ERROR: Cannot find {param}\n"
+                 f"Make sure the folder '{model_path}' contains "
+                 f"model.ncnn.param and model.ncnn.bin")
+
+    net.load_param(param)
+    net.load_model(bins)
+    print(f"[Model] Loaded NCNN model: {model_path}")
+    return net
 
 
-def detect_yolo(model, image: np.ndarray, conf: float) -> list[dict]:
+def detect_yolo(net, image: np.ndarray, conf: float) -> list[dict]:
     """
-    Run YOLOv8 inference on a single BGR frame.
+    Run YOLOv8 NCNN inference on a single BGR frame.
 
     Returns a list of dicts:
         { 'box': [x1, y1, x2, y2], 'class_id': int, 'score': float }
 
     Only vehicle classes are returned (VEHICLE_CLASS_IDS).
     """
-    results = model(image, imgsz=YOLO_IMGSZ, conf=conf, verbose=False)
+    import ncnn
 
-    detections = []
-    for result in results:
-        boxes = result.boxes
-        if boxes is None:
+    h, w = image.shape[:2]
+
+    # Pre-process: resize + normalise to [0, 1]
+    mat_in = ncnn.Mat.from_pixels_resize(
+        image,
+        ncnn.Mat.PixelType.PIXEL_BGR,
+        w, h,
+        YOLO_IMGSZ, YOLO_IMGSZ
+    )
+    mat_in.substract_mean_normalize([0, 0, 0], [1 / 255.0, 1 / 255.0, 1 / 255.0])
+
+    # Inference
+    ex = net.create_extractor()
+    ex.input("in0", mat_in)
+    ret, mat_out = ex.extract("out0")
+
+    if ret != 0 or mat_out is None:
+        return []
+
+    # YOLOv8 NCNN output shape: (84, 2100) for imgsz=320
+    #   84  = 4 box coords (cx, cy, w, h) + 80 class scores
+    #   2100 = 10x10 + 20x20 + 40x40 anchor grid
+    out = np.array(mat_out)          # (84, 2100)
+    out = out.T                      # (2100, 84)
+
+    boxes_xywh  = out[:, :4]        # cx, cy, w, h  (in YOLO_IMGSZ space)
+    class_scores_all = out[:, 4:]   # (2100, 80)
+
+    class_ids    = np.argmax(class_scores_all, axis=1)          # (2100,)
+    class_scores = class_scores_all[np.arange(len(out)), class_ids]  # (2100,)
+
+    # Scale factors back to original image size
+    scale_x = w / YOLO_IMGSZ
+    scale_y = h / YOLO_IMGSZ
+
+    boxes_list, cls_list, score_list = [], [], []
+
+    for i in np.where(class_scores >= conf)[0]:
+        cls_id = int(class_ids[i])
+        if cls_id not in VEHICLE_CLASS_IDS:
             continue
-        for box in boxes:
-            cls_id = int(box.cls[0])
-            if cls_id not in VEHICLE_CLASS_IDS:
-                continue
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            score = float(box.conf[0])
-            detections.append({
-                "box": [x1, y1, x2, y2],
-                "class_id": cls_id,
-                "score": score,
-            })
 
-    return detections
+        cx, cy, bw, bh = boxes_xywh[i]
+        x1 = int((cx - bw / 2) * scale_x)
+        y1 = int((cy - bh / 2) * scale_y)
+        x2 = int((cx + bw / 2) * scale_x)
+        y2 = int((cy + bh / 2) * scale_y)
+
+        # Clamp to frame bounds
+        x1 = max(0, x1);  y1 = max(0, y1)
+        x2 = min(w, x2);  y2 = min(h, y2)
+
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        boxes_list.append([x1, y1, x2, y2])
+        cls_list.append(cls_id)
+        score_list.append(float(class_scores[i]))
+
+    if not boxes_list:
+        return []
+
+    # Non-maximum suppression
+    nms_boxes = [[x1, y1, x2 - x1, y2 - y1] for x1, y1, x2, y2 in boxes_list]
+    indices   = cv2.dnn.NMSBoxes(nms_boxes, score_list, conf, 0.45)
+
+    if len(indices) == 0:
+        return []
+
+    indices = indices.flatten()
+    return [
+        {
+            "box":      boxes_list[i],
+            "class_id": cls_list[i],
+            "score":    score_list[i],
+        }
+        for i in indices
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -188,18 +249,16 @@ def run(args):
     model = load_yolo(args.model)
 
     # --- Frame-skip state ---
-    # base_skip  — the user-supplied (or default) frame-skip value
-    # cur_skip   — the effective skip this frame (may be halved during motion)
     base_skip = args.frame_skip
 
     # --- FPS bookkeeping ---
     fps         = 0.0
     fps_counter = 0
     fps_timer   = time.time()
-    FPS_WINDOW  = 10   # average FPS over this many processed frames
+    FPS_WINDOW  = 10
 
-    raw_frame_count = 0     # counts every frame read (for frame-skip logic)
-    last_annotated  = None  # cache: last fully processed + annotated frame
+    raw_frame_count = 0
+    last_annotated  = None
 
     print("[Detector] Starting.  Press ESC to quit.")
     print(f"[Detector] Base frame-skip: {base_skip}  "
@@ -219,23 +278,17 @@ def run(args):
 
         raw_frame_count += 1
 
-        # -------------------------------------------------------------------
-        # Motion detection  (runs on EVERY raw frame — it is very cheap)
-        # -------------------------------------------------------------------
-        # Resize to display size first so the diff is always on the same scale.
+        # Motion detection (cheap — runs every frame)
         frame_for_motion = cv2.resize(image, (DISPLAY_W, DISPLAY_H))
         if args.flip:
             frame_for_motion = cv2.flip(frame_for_motion, 1)
 
         motion = utils.detect_motion(frame_for_motion)
 
-        # Adaptive frame-skip: halve the skip interval when motion is detected
+        # Adaptive frame-skip
         cur_skip = max(1, base_skip // MOTION_SPEEDUP_FACTOR) if motion else base_skip
 
-        # -------------------------------------------------------------------
-        # Frame skip — skipped frames show the last annotated result instead
-        # of a blank / raw frame so the window stays visually smooth.
-        # -------------------------------------------------------------------
+        # Show cached frame on skipped frames
         if raw_frame_count % cur_skip != 0:
             if last_annotated is not None:
                 cv2.imshow("Vehicle Detector", last_annotated)
@@ -243,17 +296,12 @@ def run(args):
                 break
             continue
 
-        # -------------------------------------------------------------------
-        # Pre-process the frame chosen for inference
-        # -------------------------------------------------------------------
-        # Use the already-flipped-and-resized frame we prepared above so we
-        # don't need to flip/resize twice.
         image = frame_for_motion
 
         # --- Detect ---
         detections = detect_yolo(model, image, args.conf)
 
-        # --- Visualize (tracking + zone counting + CSV logging inside utils) ---
+        # --- Visualize ---
         image = utils.visualize(image, detections)
 
         # --- FPS overlay ---
@@ -264,17 +312,14 @@ def run(args):
             fps_timer   = time.time()
             fps_counter = 0
 
-        # Show effective skip and motion status alongside FPS
         skip_label = f"skip={cur_skip}" + (" ▲" if motion else "")
         cv2.putText(image, f"FPS {fps:.1f}  {skip_label}", (10, 20),
                     cv2.FONT_HERSHEY_PLAIN, 1.2, (0, 0, 255), 2)
 
-        # Cache this frame
         last_annotated = image
 
-        # --- Display ---
         cv2.imshow("Vehicle Detector", image)
-        if cv2.waitKey(1) == 27:   # ESC to quit
+        if cv2.waitKey(1) == 27:
             break
 
     # --- Cleanup ---
@@ -293,17 +338,17 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Vehicle detector + zone counter (YOLOv8, Raspberry Pi)"
+        description="Vehicle detector + zone counter (YOLOv8 NCNN, Raspberry Pi)"
     )
     parser.add_argument(
         "--model",
-        default="yolov8n.pt",
-        help="Path to YOLOv8 model (.pt file or NCNN folder). "
-             "Default: yolov8n.pt",
+        default="yolov8n_ncnn_model",
+        help="Path to NCNN model folder containing model.ncnn.param and model.ncnn.bin. "
+             "Default: yolov8n_ncnn_model",
     )
     parser.add_argument(
         "--source",
-        default="picamera",            # ← Pi camera is now the default
+        default="picamera",
         help="Video source: 'picamera' (default), camera index (0,1,...), "
              "or path to a video file.",
     )
@@ -325,8 +370,7 @@ def main():
         dest="flip",
         action="store_false",
         default=True,
-        help="Disable horizontal flip (useful for prerecorded footage or a "
-             "correctly-mounted camera).  Default: flip is ON for Pi cam.",
+        help="Disable horizontal flip. Default: flip is ON for Pi cam.",
     )
 
     args = parser.parse_args()
