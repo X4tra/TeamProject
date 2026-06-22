@@ -9,16 +9,32 @@ services:
         networks:
             - TPnet
         restart: unless-stopped
-    # api:
-    #     build: ./backend
-    #     networks:
-    #         - TPnet
-    #     restart: unless-stopped
-    # counter:
-    #     build: ./counter
-    #     networks:
-    #         - TPnet
-    #     restart: unless-stopped
+    counter:
+        build: ./counter
+        container_name: counter
+        networks:
+            - TPnet
+        environment:
+            - DISPLAY=${DISPLAY}
+            - PYTHONUNBUFFERED=1
+        volumes:
+            # Mount the current directory to save logs (.csv) persistently on the host
+            - .:/app
+            # Forward the X11 display socket so Pygame can draw the window
+            - /tmp/.X11-unix:/tmp/.X11-unix:ro
+        devices:
+            # --- CHOOSE/UNCOMMENT YOUR CAMERA DEVICE HERE ---
+            # For a standard USB Webcam, uncomment this line:
+            # - /dev/video0:/dev/video0
+            # For the official Raspberry Pi Camera Module, uncomment these lines instead:
+            - /dev/vchiq:/dev/vchiq
+            - /dev/video10:/dev/video10
+            - /dev/video11:/dev/video11
+            - /dev/video12:/dev/video12
+
+        command: [ "--source", "0", "--no-fullscreen", "--conf", "0.25" ]
+        restart: unless-stopped
+
     test:
         build: ./test
         container_name: test
